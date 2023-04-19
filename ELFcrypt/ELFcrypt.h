@@ -10,7 +10,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 
-#define ENTRY ((unsigned char *)0x400000)
+//#define ENTRY ((unsigned char *)0x400000)
 #define CRYPTED __attribute__((section(".crypted")))
 
 
@@ -255,30 +255,93 @@ int rc4(unsigned char *data, size_t size, const unsigned char *key) {
   return 0;
 }
 
+// 由于原rc4函数的最后一条有效语句data[i] ^= tmp;
+// 无法适应内存中的数据操作，在原rc4函数中，data是一个char *
+// 所以最终解密数据被写入了一个其他地址，而非内存中的.crypted 节
+// 所以这里将原rc4函数修改一下
+int rc4_de(unsigned long long data, size_t size, const unsigned char *key) {
+  int           i;
+  int           rc4i;
+  int           rc4j;
+  unsigned char rc4s[256];
+  unsigned int  tmp;
+  unsigned char result;
+
+  if (strlen((char *)key) > sizeof(rc4s)) {
+    fprintf(stderr, "Key must be under %ld bytes\n", sizeof(rc4s));
+    return 1;
+  }
+
+  /* Key-scheduling algorithm */
+  for (i = 0; i < sizeof(rc4s); i++)
+    rc4s[i] = i;
+
+  for (rc4i = 0, rc4j = 0; rc4i < sizeof(rc4s); rc4i++) {
+    rc4j = (rc4j + rc4s[rc4i] + key[rc4i % strlen((char *)key)]) % sizeof(rc4s);
+
+    /* swap s[i] and s[j] */
+    tmp = rc4s[rc4j];
+    rc4s[rc4j] = rc4s[rc4i];
+    rc4s[rc4i] = tmp;
+  }
+
+  /* encrypt data */
+  for (rc4i = 0, rc4j = 0, i = 0; i < size; i++) {
+    rc4i = (rc4i + 1) % sizeof(rc4s);
+    rc4j = (rc4j + rc4s[rc4i]) % sizeof(rc4s);
+
+    /* swap s[i] and s[j] */
+    tmp = rc4s[rc4j];
+    rc4s[rc4j] = rc4s[rc4i];
+    rc4s[rc4i] = tmp;
+
+    result = rc4s[(rc4s[rc4i] + rc4s[rc4j]) % sizeof(rc4s)];
+    unsigned char* newdata = (unsigned char *)data;
+    newdata = newdata + i;
+    *newdata ^= result;
+  }
+
+  return 0;
+}
+
 
 /* ELFdecrypt() -- Decrypt .crypted section of ELF file.
+ * 解密 ELF 文件的 .crypted 节
  *
  * Args:
  *     pass - If desired, pass the key in here. This is not very secure,
  *            but provides some obfuscation.
+ *            如果需要，请在此处传递密钥。 这不是很安全，但提供了一些混淆。
  *
  * Returns:
  *     Nothing
  *
  * Note: if the ELFCRYPT environment variable is set, this will attempt to use
  * its contents as the encryption key.
+ *
+ * 如果设置了 ELFCRYPT 环境变量，这将尝试使用其内容作为加密密钥。
  */
-void ELFdecrypt(char *pass) {
-  int           section_length;
-  int           crypted_section;
+
+// 由于ELF头部的e_ident[EI_PAD]开始的字节是保留字节
+// Ubuntu在加载程序的时候会将这写保留字节置为0
+// 所以，这里的加密节长度和偏移必须从文件读取
+// 这里的解密函数添加了两个参数，用来接收ELF头部的e_ident[EI_PAD]偏移和长度
+void ELFdecrypt(char *pass, unsigned long long entry, int crypted_section ,int section_length) {
+  //int           section_length;
+  //int           crypted_section;
   char          *key;
-  unsigned char *ptr;
-  unsigned char *ptr2;
+  //unsigned char *ptr;
+  //unsigned char *ptr2;
   size_t        pagesize;
   uintptr_t     pagestart;
   int           size;
 
+  //为了和程序保持兼容，把新添加的参数ENTRY从数值转换为16进制字符串
+  //unsigned char ENTRY[30] = {'\0'};
+  unsigned long long temp = entry + crypted_section;
+  //snprintf(ENTRY, 29, "0x%llx", temp);
 
+  // 获取环境变量的值或密码
   if (pass == NULL) {
     key = getenv("ELFCRYPT");
     if (key == NULL) {
@@ -291,21 +354,31 @@ void ELFdecrypt(char *pass) {
   }
 
   /* Retrieve crypted section offset and size stored by ELFcrypt */
-  crypted_section = *((int *)(ENTRY + 0x09));
-  section_length = *((short *)(ENTRY + 0x0d));
+  // 获取由 ELFcrypt 存储的加密节偏移量和大小
+  //crypted_section = *((int *)(ENTRY + 0x09));
+  //section_length = *((short *)(ENTRY + 0x0d));
+
+
+ 
 
   /* Calculate offsets and sizes */
+  // 计算offset和size 
+  /*
   ptr = ENTRY + crypted_section;
   ptr2 = ENTRY + crypted_section + section_length;
   pagesize = sysconf(_SC_PAGESIZE);
-  pagestart = (uintptr_t)ptr & -pagesize;
+  pagestart = (uintptr_t)ptr & -pagesize;   //这个计算会算出是第几页
   size = (ptr2 - (unsigned char *)pagestart);
-
+    */
+  pagesize = sysconf(_SC_PAGESIZE);
+  pagestart = (uintptr_t)(entry+crypted_section) & -pagesize;   //计算第几页
+  size = pagesize;  //仅做测试，没有考虑加密节超过一页的情况
+  
   if (mprotect((void *)pagestart, size, PROT_READ | PROT_WRITE | PROT_EXEC) == -1)
     fatal("mprotect(): %s\n", strerror(errno));
 
   /* decrypt using specified key */
-  rc4(ENTRY + crypted_section, section_length, (unsigned char *)key);
+  rc4_de(temp, section_length, (unsigned char *)key);
 
   if (mprotect((void *)pagestart, size, PROT_READ | PROT_EXEC) < 0)
     fatal("mprotect(): %s\n", strerror(errno));
