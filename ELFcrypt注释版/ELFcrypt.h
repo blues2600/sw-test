@@ -101,6 +101,7 @@ size_t get_elf_size(const char *progname) {
 
   // 使用本软件的elf文件必须经过特定格式的加密，因为这里计算stub的方式是
   // section header table的后面是加密数据，elfsize即是大小也是文件指针
+  // 2023年04月19日更新，elfsize如果作为文件指针，那么它指向section header table的下一个字节
   elfsize = ELFheader->e_shoff + (ELFheader->e_shnum * ELFheader->e_shentsize);
 
   close(fd);

@@ -30,16 +30,32 @@ int main(int argc, char *argv[], char *envp[]) {
   char            characters[] = \
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
 
+  /* 记住，这是一个猜想
+   * 这里有一个猜想，程序由自身 + stub 组成，其中stub包含了有效载荷
+   * 我们再假设，如果程序自身的ELF结构依次为
+   *    --------------------
+   *    elf header
+   *    program header table
+   *    section 
+   *    sections...
+   *    section header table
+   *    --------------------
+   *    stub
+   *    --------------------
+   * 那么，程序get_elf_size函数中计算e_shoff + (e_shnum * e_shentsize)
+   * 就变得合理了。因为，这刚好指向了stub的第一个字节，而且完美的避开了
+   * 程序自身的数据。
 
   // 生成随机数种子
   /* Seed RNG */
   srand(time(NULL));
 
-  // 计算整个文件的大小
+  // 计算进程自身的程序文件大小
   /* Calculate size of the stub + encrypted ELF */
   filesize = get_file_size(argv[0]);
 
   // offset指向加密数据的第一个字节
+  // elfsize如果作为文件指针，那么它指向section header table的下一个字节
   /* Calculate size of the stub */
   offset = get_elf_size(argv[0]);
   if (offset == -1)
@@ -51,13 +67,14 @@ int main(int argc, char *argv[], char *envp[]) {
   if (in == -1)
     return EXIT_FAILURE;
 
-  // 把文件映射到内存
+  // 把进程自身对应的文件映射到内存
   program = mmap(0, filesize, PROT_READ | PROT_WRITE, MAP_PRIVATE, in, 0);
   if (program == MAP_FAILED)
     return EXIT_FAILURE;
 
   /* Skip the stub. The encrypted data lies right after the stub. */
-  // 指向加密数据
+  // 指向加密数据的第一个字节
+  // 如果ELF结构的猜想是正确的，那么program指向stub的第一个字节
   program += offset;
 
   // 获得本机ELFCRYPT环境变量的值，如果没有则要求用户输入
@@ -67,6 +84,7 @@ int main(int argc, char *argv[], char *envp[]) {
     key = (unsigned char *)getpass("Enter passphrase: ");
 
   // 由于rc4是对称加密算法，这里运行rc4的功能是解密数据
+  // 如果猜想是正确的，那么这里解密的刚好是整个stub
   if (rc4(program, filesize - offset, key) == 1)
     return EXIT_FAILURE;
 
